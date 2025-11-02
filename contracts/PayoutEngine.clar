@@ -1,0 +1,72 @@
+(define-constant ERR-NOT-FOUND u100)
+(define-constant ERR-UNAUTHORIZED u101)
+(define-constant ERR-INVALID-INSTALLATION u102)
+(define-constant ERR-INSUFFICIENT-POOL u103)
+(define-constant ERR-ALREADY-CLAIMED u104)
+(define-constant ERR-INVALID-AMOUNT u105)
+(define-constant ERR-ORACLE-FAIL u106)
+(define-constant ERR-RATE-NOT-SET u107)
+
+(define-data-var subsidy-rate uint u50)
+(define-data-var last-claimed (map uint uint) (map))
+(define-data-var nonce uint u0)
+
+(define-map installations uint {owner: principal, capacity: uint, verified: bool})
+(define-map energy-data uint {kwh: uint, timestamp: uint, valid: bool})
+
+(define-read-only (get-subsidy-rate)
+  (var-get subsidy-rate))
+
+(define-read-only (get-installation (id uint))
+  (map-get? installations id))
+
+(define-read-only (get-energy-data (id uint))
+  (map-get? energy-data id))
+
+(define-read-only (get-last-claimed (id uint))
+  (map-get? last-claimed id))
+
+(define-public (set-subsidy-rate (rate uint))
+  (begin
+    (asserts! (is-eq tx-sender (contract-call? .Governance get-admin)) (err ERR-UNAUTHORIZED))
+    (asserts! (> rate u0) (err ERR-INVALID-AMOUNT))
+    (var-set subsidy-rate rate)
+    (ok true)))
+
+(define-public (register-installation (id uint) (capacity uint))
+  (let ((caller tx-sender))
+    (asserts! (> capacity u0) (err ERR-INVALID-AMOUNT))
+    (map-set installations id {owner: caller, capacity: capacity, verified: false})
+    (ok true)))
+
+(define-public (verify-installation (id uint))
+  (let ((inst (unwrap! (map-get? installations id) (err ERR-NOT-FOUND))))
+    (asserts! (is-eq tx-sender (contract-call? .InstallationRegistry get-verifier)) (err ERR-UNAUTHORIZED))
+    (map-set installations id (merge inst {verified: true}))
+    (ok true)))
+
+(define-public (submit-energy-data (id uint) (kwh uint) (timestamp uint))
+  (let ((nonce-val (var-get nonce)))
+    (asserts! (is-eq tx-sender (contract-call? .EnergyOracle get-oracle)) (err ERR-UNAUTHORIZED))
+    (asserts! (> kwh u0) (err ERR-INVALID-AMOUNT))
+    (asserts! (>= timestamp block-height) (err ERR-INVALID-AMOUNT))
+    (map-set energy-data id {kwh: kwh, timestamp: timestamp, valid: true})
+    (var-set nonce (+ nonce-val u1))
+    (ok nonce-val)))
+
+(define-public (claim-subsidy (installation-id uint))
+  (let (
+    (inst (unwrap! (map-get? installations installation-id) (err ERR-NOT-FOUND)))
+    (energy (unwrap! (map-get? energy-data installation-id) (err ERR-ORACLE-FAIL)))
+    (rate (var-get subsidy-rate))
+    (last (default-to u0 (map-get? last-claimed installation-id)))
+  )
+    (asserts! (get verified inst) (err ERR-INVALID-INSTALLATION))
+    (asserts! (get valid energy) (err ERR-ORACLE-FAIL))
+    (asserts! (> rate u0) (err ERR-RATE-NOT-SET))
+    (asserts! (> (get timestamp energy) last) (err ERR-ALREADY-CLAIMED))
+    (let ((payout (* (get kwh energy) rate)))
+      (asserts! (>= (stx-get-balance (as-contract tx-sender)) payout) (err ERR-INSUFFICIENT-POOL))
+      (try! (as-contract (stx-transfer? payout tx-sender (get owner inst))))
+      (map-set last-claimed installation-id (get timestamp energy))
+      (ok payout))))
